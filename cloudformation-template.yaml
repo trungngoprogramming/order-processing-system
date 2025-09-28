@@ -1,0 +1,501 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Order Processing System - Serverless với Stripe webhook'
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    Description: Deployment stage
+  
+Resources:
+  # SNS Topic chính
+  OrderProcessingTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-order-processing'
+
+  # SQS Dead Letter Queues
+  OrderProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-order-processing-dlq'
+      MessageRetentionPeriod: 1209600
+
+  EmailDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-email-dlq'
+      MessageRetentionPeriod: 1209600
+
+  InventoryDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-inventory-dlq'
+      MessageRetentionPeriod: 1209600
+
+  # SQS Main Queues
+  OrderProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-order-processing'
+      VisibilityTimeoutSeconds: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderProcessingDLQ.Arn
+        maxReceiveCount: 3
+
+  EmailQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-email'
+      VisibilityTimeoutSeconds: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EmailDLQ.Arn
+        maxReceiveCount: 3
+
+  InventoryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-inventory'
+      VisibilityTimeoutSeconds: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt InventoryDLQ.Arn
+        maxReceiveCount: 3
+
+  # SNS Subscriptions
+  OrderProcessingSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref OrderProcessingTopic
+      Endpoint: !GetAtt OrderProcessingQueue.Arn
+      FilterPolicy:
+        event_type: ["order_created", "order_updated"]
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref OrderProcessingTopic
+      Endpoint: !GetAtt EmailQueue.Arn
+      FilterPolicy:
+        event_type: ["order_created", "payment_confirmed"]
+
+  InventorySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref OrderProcessingTopic
+      Endpoint: !GetAtt InventoryQueue.Arn
+      FilterPolicy:
+        event_type: ["order_created", "inventory_update"]
+
+  # SQS Policies cho SNS
+  OrderProcessingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref OrderProcessingQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt OrderProcessingQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderProcessingTopic
+
+  EmailQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref EmailQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt EmailQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderProcessingTopic
+
+  InventoryQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref InventoryQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt InventoryQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderProcessingTopic
+
+  # DynamoDB Table
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-orders'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: customer_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: customer-index
+          KeySchema:
+            - AttributeName: customer_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # IAM Role cho Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: OrderProcessingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref OrderProcessingTopic
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt OrderProcessingQueue.Arn
+                  - !GetAtt EmailQueue.Arn
+                  - !GetAtt InventoryQueue.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt OrdersTable.Arn
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref OrderProcessingSecrets
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  # Lambda Functions
+  StripeWebhookFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-stripe-webhook'
+      Runtime: python3.9
+      Handler: stripe_webhook.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({'message': 'Placeholder - deploy actual code'})
+              }
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref OrderProcessingTopic
+          SECRETS_MANAGER_ARN: !Ref OrderProcessingSecrets
+      Timeout: 30
+
+  OrderProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-order-processor'
+      Runtime: python3.9
+      Handler: order_processor.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {'statusCode': 200}
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref OrdersTable
+      Timeout: 30
+
+  EmailProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-email-processor'
+      Runtime: python3.9
+      Handler: email_processor.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {'statusCode': 200}
+      Environment:
+        Variables:
+          SECRETS_MANAGER_ARN: !Ref OrderProcessingSecrets
+      Timeout: 30
+
+  InventoryProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-inventory-processor'
+      Runtime: python3.9
+      Handler: inventory_processor.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {'statusCode': 200}
+      Timeout: 30
+
+  # SQS Event Source Mappings
+  OrderProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt OrderProcessingQueue.Arn
+      FunctionName: !Ref OrderProcessorFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
+
+  EmailProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt EmailQueue.Arn
+      FunctionName: !Ref EmailProcessorFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
+
+  InventoryProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt InventoryQueue.Arn
+      FunctionName: !Ref InventoryProcessorFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
+
+  # API Gateway
+  OrderProcessingApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      Description: Order Processing API for Stripe webhooks
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  WebhookResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrderProcessingApi
+      ParentId: !GetAtt OrderProcessingApi.RootResourceId
+      PathPart: webhook
+
+  StripeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrderProcessingApi
+      ParentId: !Ref WebhookResource
+      PathPart: stripe
+
+  StripeWebhookMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrderProcessingApi
+      ResourceId: !Ref StripeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${StripeWebhookFunction.Arn}/invocations'
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: StripeWebhookMethod
+    Properties:
+      RestApiId: !Ref OrderProcessingApi
+      StageName: !Ref Stage
+
+  LambdaApiGatewayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StripeWebhookFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OrderProcessingApi}/*/*'
+
+  # Secrets Manager
+  OrderProcessingSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}-secrets'
+      Description: "Secrets for order processing system"
+      SecretString: !Sub |
+        {
+          "stripe_webhook_secret": "whsec_your_stripe_webhook_secret_here",
+          "stripe_api_key": "sk_test_your_stripe_api_key_here",
+          "ses_from_email": "noreply@yourdomain.com"
+        }
+
+  # CloudWatch Alarms
+  OrderProcessingQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-order-queue-messages'
+      AlarmDescription: "Monitor messages in order processing queue"
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrderProcessingQueue.QueueName
+
+  EmailQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-email-queue-messages'
+      AlarmDescription: "Monitor messages in email queue"
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt EmailQueue.QueueName
+
+  InventoryQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-inventory-queue-messages'
+      AlarmDescription: "Monitor messages in inventory queue"
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt InventoryQueue.QueueName
+
+  # DLQ Alarms
+  OrderProcessingDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-order-dlq-messages'
+      AlarmDescription: "Monitor messages in order processing DLQ"
+      MetricName: ApproximateNumberOfVisibleMessages
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OrderProcessingDLQ.QueueName
+
+Outputs:
+  WebhookUrl:
+    Description: Stripe Webhook URL
+    Value: !Sub 'https://${OrderProcessingApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/webhook/stripe'
+    Export:
+      Name: !Sub '${AWS::StackName}-webhook-url'
+
+  ApiGatewayId:
+    Description: API Gateway ID
+    Value: !Ref OrderProcessingApi
+    Export:
+      Name: !Sub '${AWS::StackName}-api-gateway-id'
+
+  OrderProcessingTopicArn:
+    Description: SNS Topic ARN
+    Value: !Ref OrderProcessingTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-sns-topic-arn'
+
+  OrdersTableName:
+    Description: DynamoDB Orders Table Name
+    Value: !Ref OrdersTable
+    Export:
+      Name: !Sub '${AWS::StackName}-orders-table'
+
+  SecretsManagerArn:
+    Description: Secrets Manager ARN
+    Value: !Ref OrderProcessingSecrets
+    Export:
+      Name: !Sub '${AWS::StackName}-secrets-arn'
+
+  StripeWebhookFunctionArn:
+    Description: Stripe Webhook Lambda Function ARN
+    Value: !GetAtt StripeWebhookFunction.Arn
+
+  OrderProcessorFunctionArn:
+    Description: Order Processor Lambda Function ARN
+    Value: !GetAtt OrderProcessorFunction.Arn
+
+  EmailProcessorFunctionArn:
+    Description: Email Processor Lambda Function ARN
+    Value: !GetAtt EmailProcessorFunction.Arn
+
+  InventoryProcessorFunctionArn:
+    Description: Inventory Processor Lambda Function ARN
+    Value: !GetAtt InventoryProcessorFunction.Arn
+
+  OrderProcessingQueueUrl:
+    Description: Order Processing SQS Queue URL
+    Value: !Ref OrderProcessingQueue
+
+  EmailQueueUrl:
+    Description: Email SQS Queue URL
+    Value: !Ref EmailQueue
+
+  InventoryQueueUrl:
+    Description: Inventory SQS Queue URL
+    Value: !Ref InventoryQueue
