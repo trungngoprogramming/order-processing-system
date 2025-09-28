@@ -1,0 +1,18 @@
+# AWS SDK
+boto3==1.34.0
+botocore==1.34.0
+
+# Stripe SDK cho webhook validation
+stripe==7.8.0
+
+# JSON parsing và validation
+jsonschema==4.20.0
+
+# Utilities
+python-dateutil==2.8.2
+requests==2.31.0
+
+# Development dependencies (optional)
+pytest==7.4.3
+pytest-mock==3.12.0
+moto==4.2.14  # AWS mocking for tests

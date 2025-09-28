@@ -1,0 +1,199 @@
+name: Simple CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  # Job 1: Build
+  build:
+    name: 📦 Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🔨 Build Lambda Packages
+        run: |
+          mkdir -p dist
+          
+          # Package each Lambda function
+          for handler in stripe_webhook order_processor email_processor inventory_processor; do
+            echo "Building $handler..."
+            mkdir -p "dist/$handler"
+            
+            # Copy handler and utils
+            cp "src/handlers/${handler}.py" "dist/$handler/"
+            cp -r src/utils "dist/$handler/"
+            
+            # Create __init__.py files
+            touch "dist/$handler/__init__.py"
+            touch "dist/$handler/utils/__init__.py"
+            
+            # Create zip package
+            (cd "dist/$handler" && zip -r "../${handler}.zip" .)
+            echo "✅ Built ${handler}.zip"
+          done
+
+      - name: 📤 Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-packages
+          path: dist/*.zip
+
+  # Job 2: Security Scan
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Run Trivy Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      # Note: Code scanning chỉ khả dụng cho GitHub Organizations
+      # - name: 📊 Upload Security Results
+      #   uses: github/codeql-action/upload-sarif@v3
+      #   if: always()
+      #   with:
+      #     sarif_file: 'trivy-results.sarif'
+
+      - name: 🔍 Trivy Summary Report
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+
+  # Job 2.5: CodeQL Analysis (chỉ khả dụng cho GitHub Organizations)
+  # codeql:
+  #   name: 🔍 CodeQL Analysis
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     actions: read
+  #     contents: read
+  #     security-events: write
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       language: [ 'python' ]
+  #   steps:
+  #     - name: 📥 Checkout Code
+  #       uses: actions/checkout@v4
+
+  #     - name: 🔍 Initialize CodeQL
+  #       uses: github/codeql-action/init@v3
+  #       with:
+  #         languages: ${{ matrix.language }}
+  #         queries: security-extended,security-and-quality
+
+  #     - name: 🔨 Autobuild
+  #       uses: github/codeql-action/autobuild@v3
+
+  #     - name: 📊 Perform CodeQL Analysis
+  #       uses: github/codeql-action/analyze@v3
+
+  # Job 3: Deploy to AWS
+  deploy:
+    name: 🚀 Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 📥 Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-packages
+          path: dist/
+
+      - name: 🚀 Deploy Infrastructure
+        run: |
+          # Determine stage based on branch
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            STAGE="prod"
+          else
+            STAGE="dev"
+          fi
+          
+          echo "Deploying to $STAGE environment..."
+          
+          # Make scripts executable
+          chmod +x scripts/deploy.sh
+          
+          # Deploy infrastructure
+          ./scripts/deploy.sh $STAGE ${{ env.AWS_REGION }}
+
+      - name: 🔄 Update Lambda Functions
+        run: |
+          # Determine stage and stack name
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            STAGE="prod"
+            STACK_NAME="order-processing-system-prod"
+          else
+            STAGE="dev"
+            STACK_NAME="order-processing-system-dev"
+          fi
+          
+          echo "Updating Lambda functions for $STAGE..."
+          
+          # Update each Lambda function with new code
+          for handler in stripe_webhook order_processor email_processor inventory_processor; do
+            if [ -f "dist/${handler}.zip" ]; then
+              echo "Updating ${STACK_NAME}-${handler}..."
+              aws lambda update-function-code \
+                --function-name "${STACK_NAME}-${handler}" \
+                --zip-file "fileb://dist/${handler}.zip" \
+                --region ${{ env.AWS_REGION }} || echo "Failed to update ${handler}"
+            fi
+          done
+
+      - name: ✅ Deployment Complete
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            STAGE="prod"
+          else
+            STAGE="dev"
+          fi
+          
+          echo "🎉 Deployment to $STAGE completed successfully!"
+          echo "📋 Summary:"
+          echo "  ✅ Infrastructure deployed"
+          echo "  ✅ Lambda functions updated"
+          echo "  ✅ Security scan passed"

@@ -1,0 +1,40 @@
+{
+  "name": "order-processing-system",
+  "version": "1.0.0",
+  "description": "Serverless order processing system with Stripe webhooks",
+  "main": "index.js",
+  "scripts": {
+    "deploy": "./scripts/deploy.sh dev ap-southeast-1",
+    "deploy:prod": "./scripts/deploy.sh prod ap-southeast-1",
+    "test": "./scripts/test_webhook.sh",
+    "monitor": "./scripts/monitor.sh",
+    "logs": "./scripts/logs.sh",
+    "costs": "./scripts/check-costs.sh",
+    "cleanup": "./scripts/cleanup.sh dev ap-southeast-1",
+    "cleanup:prod": "./scripts/cleanup.sh prod ap-southeast-1"
+  },
+  "keywords": [
+    "serverless",
+    "aws",
+    "lambda",
+    "stripe",
+    "order-processing",
+    "sns",
+    "sqs",
+    "dynamodb"
+  ],
+  "author": "Order Processing System Contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "serverless-python-requirements": "^6.1.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/order-processing-system.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/order-processing-system/issues"
+  },
+  "homepage": "https://github.com/your-org/order-processing-system#readme",
+  "type": "commonjs"
+}
