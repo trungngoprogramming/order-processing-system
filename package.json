@@ -4,14 +4,14 @@
   "description": "Serverless order processing system with Stripe webhooks",
   "main": "index.js",
   "scripts": {
-    "deploy": "./scripts/deploy.sh",
-    "deploy:prod": "./scripts/deploy.sh prod",
-    "deploy:secure": "./scripts/deploy.sh dev ap-southeast-1 secure",
-    "deploy:prod:secure": "./scripts/deploy.sh prod ap-southeast-1 secure",
-    "monitor": "./scripts/monitor.sh",
+    "deploy": "./scripts/deploy.sh dev ap-southeast-1",
+    "deploy:prod": "./scripts/deploy.sh prod ap-southeast-1",
     "test": "./scripts/test_webhook.sh",
+    "monitor": "./scripts/monitor.sh",
     "logs": "./scripts/logs.sh",
-    "clean": "aws cloudformation delete-stack --stack-name order-processing-system-dev"
+    "costs": "./scripts/check-costs.sh",
+    "cleanup": "./scripts/cleanup.sh dev ap-southeast-1",
+    "cleanup:prod": "./scripts/cleanup.sh prod ap-southeast-1"
   },
   "keywords": [
     "serverless",
